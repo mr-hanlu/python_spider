@@ -239,71 +239,52 @@ def get_doctor_details(driver, doctor_url, main_dept, fallback_avatar_src, hospi
     return doctor_info
 
 
-# --- [优化] --- 这是最终优化版，解决了遍历所有元素的问题
-def get_doctor_targets(driver: WebDriver, existing_doctor_links_this_hospital: set):
+# --- [优化] --- 使用新的、滚动更平滑的医生目标获取函数
+def get_doctor_targets_optimized(driver: WebDriver, existing_doctor_links_this_hospital: set):
     """
-    【最终优化版】只遍历新医生元素，并保证从上到下顺序处理。
+    【优化版】高效获取新医生的URL和头像SRC，并保证从上到下顺序处理。
     """
     doctor_block_selector = (By.XPATH, "//a[contains(@class, 'block--Ux6NX')]")
 
-    # --- 步骤 1: 滚动页面加载所有医生DOM ---
+    # 步骤 1: 滚动页面加载所有医生DOM
     logging.info("    滚动页面以加载所有医生...")
     last_height = driver.execute_script("return document.body.scrollHeight")
     while True:
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(1)
+        time.sleep(1)  # 等待懒加载内容
         new_height = driver.execute_script("return document.body.scrollHeight")
         if new_height == last_height:
             break
         last_height = new_height
     logging.info("    所有医生DOM加载完毕。")
 
-    # --- 步骤 2: 有序采集 - 获取所有医生元素及其URL，保持页面顺序 ---
+    # 步骤 2: 获取所有医生元素，这是按页面顺序排列的
     try:
         all_blocks = driver.find_elements(*doctor_block_selector)
         if not all_blocks:
             logging.warning("    页面上未找到任何医生信息。")
             return []
-
-        # 将元素和URL配对，存入一个有序列表中
-        all_doctors_on_page = []
-        for block in all_blocks:
-            url = block.get_attribute('href')
-            if url:
-                all_doctors_on_page.append({'element': block, 'url': url})
-
-        logging.info(f"    页面共找到 {len(all_doctors_on_page)} 名医生，开始筛选...")
-
+        logging.info(f"    页面共找到 {len(all_blocks)} 名医生，开始筛选和处理...")
     except TimeoutException:
         logging.warning("    页面上未找到任何医生信息。")
         return []
 
-    # --- 步骤 3: 高效过滤 - 创建一个只包含新医生的有序列表 ---
-    new_doctors_to_process = []
-    for doctor in all_doctors_on_page:
-        if doctor['url'] not in existing_doctor_links_this_hospital:
-            new_doctors_to_process.append(doctor)
-
-    if not new_doctors_to_process:
-        logging.info("    该科室没有需要抓取的新医生。")
-        return []
-
-    logging.info(f"    发现 {len(new_doctors_to_process)} 名新医生，开始精准处理...")
-
-    # --- 步骤 4: 精准处理 - 只遍历新医生列表进行滚动和图片提取 ---
+    # 步骤 3: 顺序遍历，过滤出新医生并处理
     new_targets = []
+    new_doctor_count = 0
     driver.execute_script("window.scrollTo(0, 0);")  # 回到顶部准备顺序处理
     time.sleep(0.5)
 
-    for doctor in new_doctors_to_process:
+    for i, block in enumerate(all_blocks):
         try:
-            block = doctor['element']
-            url = doctor['url']
-            avatar_src = "N/A"
+            url = block.get_attribute('href')
+            if not url or url in existing_doctor_links_this_hospital:
+                continue
 
-            # 滚动到当前医生卡片，这将是一个平滑且高效的向下滚动过程
+            new_doctor_count += 1
+            avatar_src = "N/A"
             driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", block)
-            time.sleep(0.4)  # 给图片加载时间
+            time.sleep(0.4)
 
             img_element = block.find_element(By.XPATH, ".//img")
             possible_attrs = ['src', 'data-src', 'data-original', 'data-url']
@@ -316,10 +297,14 @@ def get_doctor_targets(driver: WebDriver, existing_doctor_links_this_hospital: s
             new_targets.append({'url': url, 'avatar_src': avatar_src})
 
         except (NoSuchElementException, StaleElementReferenceException) as e:
-            logging.warning(f"    处理医生 {doctor['url']} 时出错: {e}，跳过。")
+            logging.warning(f"    处理第 {i + 1} 个医生时出错: {e}，跳过。")
             continue
 
-    logging.info(f"    成功处理了 {len(new_targets)} 名新医生。")
+    if new_doctor_count > 0:
+        logging.info(f"    发现并处理了 {new_doctor_count} 名新医生。")
+    else:
+        logging.info("    该科室没有需要抓取的新医生。")
+
     return new_targets
 
 
@@ -369,12 +354,11 @@ def main():
     chromedriver_path = '/Users/qkb/Desktop/mycode/my_test_code/my_code/python_spider/chromedriver-mac-arm64/chromedriver'
     service = Service(executable_path=chromedriver_path)
 
-    options.add_argument('--headless')  # 启用无头模式
-    options.add_argument('--window-size=1920,1080')  # 建议设置一个窗口大小，避免某些元素因窗口太小而找不到
+    # options.add_argument('--headless')  # 启用无头模式
+    # options.add_argument('--window-size=1920,1080')  # 建议设置一个窗口大小，避免某些元素因窗口太小而找不到
 
     # 在无头模式下，'--start-maximized' 可能无效，建议用window-size替代
-    # options.add_argument('--start-maximized')
-
+    options.add_argument('--start-maximized')
     driver = webdriver.Chrome(service=service, options=options)
 
     try:
@@ -459,7 +443,7 @@ def main():
                     if not pending_targets:
                         save_progress(hospital_id, i, sub_dept_index, hospital_range_str)
                         # --- [优化] --- 调用新的优化函数，并传入当前医院的链接集合
-                        pending_targets = get_doctor_targets(driver, existing_links_this_hospital)
+                        pending_targets = get_doctor_targets_optimized(driver, existing_links_this_hospital)
                         save_pending_doctors(pending_targets)
 
                     if pending_targets:
